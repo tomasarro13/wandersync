@@ -1,0 +1,114 @@
+name: wandersync
+
+# Imagen compartida (Python): servidor Prefect, scheduler/workers de Dask y proceso de ingesta.
+x-ingestion-image: &ingestion-image
+  build: ./services/ingestion
+  image: wandersync/ingestion:local
+
+x-ingestion-env: &ingestion-env
+  PREFECT_API_URL: http://prefect-server:4200/api
+  DASK_SCHEDULER_ADDRESS: tcp://dask-scheduler:8786
+  MOCK_SOURCES_URL: http://mock-sources:4010
+  SUPABASE_URL: ${SUPABASE_URL:-}
+  SUPABASE_SECRET_KEY: ${SUPABASE_SECRET_KEY:-}
+  DUFFEL_ACCESS_TOKEN: ${DUFFEL_ACCESS_TOKEN:-}
+  TRACE_EVENTS: ${TRACE_EVENTS:-true}
+  SCRAPER_POLITE_DELAY: ${SCRAPER_POLITE_DELAY:-0.6}
+
+x-dask-worker: &dask-worker
+  <<: *ingestion-image
+  environment: *ingestion-env
+  restart: unless-stopped
+  depends_on:
+    dask-scheduler: { condition: service_healthy }
+    prefect-server: { condition: service_healthy }
+
+services:
+  # ------------------------------------------------------------ observabilidad
+  prefect-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: prefect
+      POSTGRES_PASSWORD: prefect
+      POSTGRES_DB: prefect
+    volumes:
+      - prefect-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U prefect"]
+      interval: 5s
+      retries: 10
+
+  prefect-server:
+    <<: *ingestion-image
+    command: prefect server start --host 0.0.0.0 --port 4200
+    environment:
+      PREFECT_API_DATABASE_CONNECTION_URL: postgresql+asyncpg://prefect:prefect@prefect-db:5432/prefect
+      PREFECT_UI_API_URL: http://localhost:4200/api
+      PREFECT_SERVER_ANALYTICS_ENABLED: "false"
+    ports:
+      - "4200:4200"
+    depends_on:
+      prefect-db: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4200/api/health')"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  # ------------------------------------------------------------ clúster Dask
+  dask-scheduler:
+    <<: *ingestion-image
+    command: dask scheduler --host 0.0.0.0 --port 8786 --dashboard-address :8787
+    ports:
+      - "8787:8787"   # dashboard: http://localhost:8787/status
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8787/health')"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  dask-worker-1:
+    <<: *dask-worker
+    command: dask worker tcp://dask-scheduler:8786 --name worker-1 --nthreads 2 --memory-limit 1GiB
+
+  dask-worker-2:
+    <<: *dask-worker
+    command: dask worker tcp://dask-scheduler:8786 --name worker-2 --nthreads 2 --memory-limit 1GiB
+
+  dask-worker-3:
+    <<: *dask-worker
+    command: dask worker tcp://dask-scheduler:8786 --name worker-3 --nthreads 2 --memory-limit 1GiB
+
+  # ------------------------------------------------------------ ingesta (flows Prefect)
+  ingestion:
+    <<: *ingestion-image
+    command: python -m wandersync_ingest.serve
+    environment:
+      <<: *ingestion-env
+      INGESTION_SCHEDULE_ENABLED: ${INGESTION_SCHEDULE_ENABLED:-true}
+      INGESTION_CRON: ${INGESTION_CRON:-0 * * * *}
+      RUN_INGESTION_ON_START: ${RUN_INGESTION_ON_START:-false}
+    depends_on:
+      prefect-server: { condition: service_healthy }
+      dask-scheduler: { condition: service_healthy }
+      mock-sources: { condition: service_healthy }
+    restart: unless-stopped
+
+  # ------------------------------------------------------------ proveedores simulados
+  mock-sources:
+    build: ./services/mock-sources
+    image: wandersync/mock-sources:local
+    environment:
+      CHAOS_ENABLED: ${CHAOS_ENABLED:-true}
+      CHAOS_FAILURE_RATE: ${CHAOS_FAILURE_RATE:-0.25}
+      CHAOS_MODES: ${CHAOS_MODES:-503,429,timeout,malformed}
+      CHAOS_POISON_ROUTES: ${CHAOS_POISON_ROUTES:-BOG-LET}
+      CHAOS_POISON_LOCATIONS: ${CHAOS_POISON_LOCATIONS:-LET}
+    ports:
+      - "4010:4010"   # panel de caos: GET/POST http://localhost:4010/__chaos
+    restart: unless-stopped
+
+volumes:
+  prefect-db:

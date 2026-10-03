@@ -1,0 +1,7 @@
+prefect==3.8.7
+prefect-dask==0.3.7
+dask[distributed,dataframe,diagnostics]==2026.8.0
+distributed==2026.8.0
+bokeh==3.10.0
+httpx==0.28.1
+pandas==3.0.6

@@ -1,0 +1,17 @@
+{
+  "name": "@wandersync/mock-sources",
+  "version": "1.0.0",
+  "description": "Proveedores externos simulados (aerolíneas colombianas y alquiler de autos) con inyección de fallos",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "dependencies": {
+    "express": "^5.1.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
